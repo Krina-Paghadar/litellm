@@ -38,12 +38,23 @@ The list is the census of modules outside `litellm/caching/` that call `init_asy
 - Affinity cache
 - MCP DCR client records and the outbound credential refresh coordinator
 
+Moved in PR 2: the MCP single-use marker, the MCP outbound credential refresh lock, the pod lock, the login throttle, the max budget per session and max iterations limiters, and batch enqueued tokens
+
+Deferred out of PR 2
+
+- `parallel_request_limiter_v3`. `async_increment_cache_pipeline` writes the keys the scripts own, about 25 `DualCache` verb calls read and write the same counters, and three scripts ride `RedisBatch` with the router's read in one round trip. It moves whole after the `DualCache` verbs and a batch step are on the transport
+- Affinity cache. It lives in `litellm/caching/` and reads through `RedisBatch.script`, so it waits for the same batch step
+- MCP DCR client records. They are sealed stateless values and never reach Redis. The only raw Redis in `gateway_dcr_flow.py` was the single-use marker
+
 Accepted behavior changes
 
 - Pod lock release is the compare-and-delete Lua only. The GET plus DEL fallback goes, since `eval` already falls back from `EVALSHA` to `EVAL`. Before merge, confirm no supported Redis deployment disables scripting. If one does, the fallback stays in `PodLockManager` as caller policy, never in the store
 - Each caller's `call_type` and decode changes as in milestone 1
+- The MCP credential refresh lock now runs through the cache's breaker and emits REDIS events, which it bypassed before, and its PX rounds up to the next millisecond
+- The callers' own Redis WARNING and ERROR lines go, the transport's WARNING with the caller's service target replaces them
+- No supported deployment in the docs disables Lua scripting, and the proxy already needs it for login throttling and every limiter, so the pod lock GET plus DEL fallback goes
 
-Done when nothing outside `litellm/redis/` and `litellm/caching/` calls `.redis_client`, `init_async_client` or `async_register_script` for these keyspaces, and a lint rule bans importing redis-py outside `litellm/redis/transport/redis_py.py`. The allowlist is `litellm/caching/redis_cache.py` and `litellm/caching/redis_cluster_cache.py`, which import `redis.exceptions` for the breaker and still own the generic verbs, plus the remaining users below. The list only shrinks
+Done when nothing outside `litellm/redis/` and `litellm/caching/` calls `.redis_client`, `init_async_client` or `async_register_script` for these keyspaces, and a lint rule (`TID251` in `ruff-strict.toml`) bans importing redis-py outside `litellm/redis/transport/redis_py.py`. The allowlist is `litellm/caching/redis_cache.py` and `litellm/caching/redis_cluster_cache.py`, which import `redis.exceptions` for the breaker and still own the generic verbs, plus the remaining users below. In PR 2 those are `litellm/_redis.py` and `litellm/_redis_credential_provider.py` (client construction), `litellm/caching/redis_batch.py` and `litellm/caching/redis_cluster_node_isolation.py` (pipelines and the cluster connection), the two valkey vector modules, and `litellm/proxy/db/db_transaction_queue/redis_update_buffer.py`. The list only shrinks
 
 Stays on redis-py and out of this plan, per `SKILL.md`
 

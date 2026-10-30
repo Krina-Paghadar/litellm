@@ -190,19 +190,16 @@ Python only. The transport grows only the commands these keyspaces need (`incrby
 One module each in `litellm/redis/stores/`
 
 ```text
-mcp_single_use.py        McpSingleUseStore       claim, peek
-pod_lock.py              PodLockStore            acquire, release
-rate_limit.py            RateLimitStore          check_and_increment, decrement, read_windows
-session_budget.py        SessionBudgetStore      add_spend, spend
-iteration_count.py       IterationCountStore     increment
-enqueued_tokens.py       EnqueuedTokensStore     add, total
-login_throttle.py        LoginThrottleStore      record_failure, failures, clear
-affinity.py              AffinityStore           pin, pinned
-mcp_dcr.py               McpDcrStore             put_client, get_client
-mcp_credential_refresh.py McpRefreshLockStore    acquire, release
+mcp_single_use.py         McpSingleUseStore       claim, peek
+pod_lock.py               PodLockStore            acquire, holder, release
+session_budget.py         SessionBudgetStore      add_spend, spend
+iteration_count.py        IterationCountStore     increment
+enqueued_tokens.py        EnqueuedTokensStore     reserve, refund, save_record, pop_record
+login_throttle.py         LoginThrottleStore      blocks, record_failure, clear
+mcp_credential_refresh.py McpRefreshLockStore     acquire, extend, release, is_held
 ```
 
-Operation names are a starting point, each PR names them for what its caller wants. The spend update buffer is not here, it reaches Redis through `RedisCache` list pipelines, which stay
+Operation names are what each caller wants. `PodLockStore.holder` exists because three cron jobs peek at `cronjob_lock:*` directly, and the keyspace moves whole. The spend update buffer is not here, it reaches Redis through `RedisCache` list pipelines, which stay. Three entries from the first draft of this list are deferred, see `migration-plan.md`. `parallel_request_limiter_v3` and the affinity cache read and write their keys through `DualCache` verbs and `RedisBatch` as well, and MCP DCR client records never reach Redis
 
 ### Example, `litellm/redis/stores/mcp_single_use.py`
 
@@ -302,12 +299,14 @@ The caller keeps the policy. `allow_reentrant` decides whether `HeldBy(self.pod_
 
 ### Lint gate
 
+In `ruff-strict.toml`
+
 ```toml
 [lint.flake8-tidy-imports.banned-api]
-"redis".msg = "reach Redis through litellm.redis (see .agents/skills/redis-access)"
+"redis".msg = "Reach Redis through litellm.redis (see .agents/skills/redis-access)."
 ```
 
-Allowed in `litellm/redis/transport/redis_py.py`, `litellm/caching/redis_cache.py` and `litellm/caching/redis_cluster_cache.py` (they import `redis.exceptions` for the breaker and own the generic verbs), plus a per-file ignore for each remaining redis-py user listed in `migration-plan.md`, so the list only shrinks
+Allowed through `[lint.per-file-ignores]` in `litellm/redis/transport/redis_py.py`, `litellm/caching/redis_cache.py` and `litellm/caching/redis_cluster_cache.py` (they import `redis.exceptions` for the breaker and own the generic verbs), plus one entry for each remaining redis-py user listed in `migration-plan.md`, so the list only shrinks
 
 ## 3. Rust client parity
 
